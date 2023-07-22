@@ -14,10 +14,12 @@
 #include "imgui_impl_vulkan.h"
 #include <stdio.h>  // printf, fprintf
 #include <stdlib.h> // abort
+#include <memory>
 #define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
+#include <vma/vk_mem_alloc.h>
 // #include <vulkan/vulkan_beta.h>
 
 // [Win32] Our example includes a copy of glfw3.lib pre-compiled with VS2010 to maximize ease of testing and compatibility with old VS compilers.
@@ -32,6 +34,15 @@
 #define IMGUI_VULKAN_DEBUG_REPORT
 #endif
 
+#define CHECK_VK_RESULT(expr)                                                                          \
+    {                                                                                                  \
+        VkResult result_ = expr;                                                                       \
+        if (result_ != VK_SUCCESS) {                                                                   \
+            printf("File: %s Line: %d %s = %d", __FILE__, __LINE__, #expr, static_cast<int>(result_)); \
+            abort();                                                                                   \
+        }                                                                                              \
+    }
+
 // Data
 static VkAllocationCallbacks* g_Allocator = nullptr;
 static VkInstance g_Instance = VK_NULL_HANDLE;
@@ -42,6 +53,8 @@ static VkQueue g_Queue = VK_NULL_HANDLE;
 static VkDebugReportCallbackEXT g_DebugReport = VK_NULL_HANDLE;
 static VkPipelineCache g_PipelineCache = VK_NULL_HANDLE;
 static VkDescriptorPool g_DescriptorPool = VK_NULL_HANDLE;
+static VmaAllocator g_VmaAllocator = VK_NULL_HANDLE;
+static VkCommandPool g_CommandPool = VK_NULL_HANDLE;
 
 static ImGui_ImplVulkanH_Window g_MainWindowData;
 static int g_MinImageCount = 2;
@@ -234,6 +247,25 @@ static void SetupVulkan(ImVector<const char*> instance_extensions) {
         err = vkCreateDescriptorPool(g_Device, &pool_info, g_Allocator, &g_DescriptorPool);
         check_vk_result(err);
     }
+
+    // command pool
+    {
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = g_QueueFamily;
+
+        CHECK_VK_RESULT(vkCreateCommandPool(g_Device, &poolInfo, nullptr, &g_CommandPool));
+    }
+
+    // allocator
+    {
+        VmaAllocatorCreateInfo allocatorCreateInfo{};
+        allocatorCreateInfo.instance = g_Instance;
+        allocatorCreateInfo.physicalDevice = g_PhysicalDevice;
+        allocatorCreateInfo.device = g_Device;
+        vmaCreateAllocator(&allocatorCreateInfo, &g_VmaAllocator);
+    }
 }
 
 // All the ImGui_ImplVulkanH_XXX structures/functions are optional helpers used by the demo.
@@ -370,6 +402,288 @@ static void FramePresent(ImGui_ImplVulkanH_Window* wd) {
     wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->ImageCount; // Now we can use the next set of semaphores
 }
 
+class Image {
+public:
+    Image(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage)
+        : m_vkExtent{ width, height }
+        , m_vkFormat(format) {
+        // image
+        {
+            VkImageCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            info.imageType = VK_IMAGE_TYPE_2D;
+            info.extent = { m_vkExtent.width, m_vkExtent.height, 1 };
+            info.mipLevels = 1;
+            info.arrayLayers = 1;
+            info.format = m_vkFormat;
+            info.tiling = tiling;
+            info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            info.usage = usage;
+            info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            info.samples = VK_SAMPLE_COUNT_1_BIT;
+            info.flags = 0;
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+            CHECK_VK_RESULT(vmaCreateImage(g_VmaAllocator, &info, &allocInfo, &m_vkImage, &m_vmaAllocation, nullptr));
+        }
+
+        // view
+        {
+            VkImageViewCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            info.format = m_vkFormat;
+            info.subresourceRange = {};
+            info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            info.subresourceRange.baseMipLevel = 0;
+            info.subresourceRange.levelCount = 1;
+            info.subresourceRange.baseArrayLayer = 0;
+            info.subresourceRange.layerCount = 1;
+            info.image = m_vkImage;
+            CHECK_VK_RESULT(vkCreateImageView(g_Device, &info, nullptr, &m_vkView));
+        }
+
+        // sampler
+        {
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_LINEAR;
+            samplerInfo.minFilter = VK_FILTER_LINEAR;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.anisotropyEnable = VK_FALSE;
+
+            // todo can probably cache this
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(g_PhysicalDevice, &properties);
+
+            samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+            samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerInfo.unnormalizedCoordinates = VK_FALSE;
+            samplerInfo.compareEnable = VK_FALSE;
+            samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerInfo.mipLodBias = 0.0f;
+            samplerInfo.minLod = 0.0f;
+            samplerInfo.maxLod = 0.0f;
+
+            CHECK_VK_RESULT(vkCreateSampler(g_Device, &samplerInfo, nullptr, &m_vkSampler));
+        }
+    }
+
+    ~Image() {
+        if (m_vkSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(g_Device, m_vkSampler, nullptr);
+        }
+        if (m_vkView != VK_NULL_HANDLE) {
+            vkDestroyImageView(g_Device, m_vkView, nullptr);
+        }
+        if (m_vkImage != VK_NULL_HANDLE) {
+            vmaFreeMemory(g_VmaAllocator, m_vmaAllocation);
+            vkDestroyImage(g_Device, m_vkImage, nullptr);
+        }
+    }
+
+    VkImage GetVkImage() const {
+        return m_vkImage;
+    }
+
+    VkImageView GetVkView() const {
+        return m_vkView;
+    }
+
+    int GetWidth() const {
+        return m_vkExtent.width;
+    }
+
+    int GetHeight() const {
+        return m_vkExtent.height;
+    }
+
+    VkDescriptorSet GetDesc() {
+        if (m_vkDesc == VK_NULL_HANDLE) {
+            m_vkDesc = ImGui_ImplVulkan_AddTexture(m_vkSampler, m_vkView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        return m_vkDesc;
+    }
+
+private:
+    VkExtent2D m_vkExtent;
+    VkFormat m_vkFormat;
+
+    VkImage m_vkImage = VK_NULL_HANDLE;
+    VmaAllocation m_vmaAllocation = VK_NULL_HANDLE;
+    VkImageView m_vkView = VK_NULL_HANDLE;
+    VkSampler m_vkSampler = VK_NULL_HANDLE;
+    VkDescriptorSet m_vkDesc = VK_NULL_HANDLE;
+};
+
+class RenderTarget {
+public:
+    RenderTarget(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkRenderPass renderPass) {
+        {
+            VkCommandBufferAllocateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            info.commandPool = g_CommandPool;
+            info.commandBufferCount = 1;
+            CHECK_VK_RESULT(vkAllocateCommandBuffers(g_Device, &info, &m_vkCommandBuffer));
+        }
+
+        {
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            vkCreateFence(g_Device, &fenceInfo, nullptr, &m_vkFence);
+        }
+
+        m_Image = std::make_unique<Image>(width, height, format, tiling, usage);
+
+        {
+            VkImageView attachments[] = { m_Image->GetVkView() };
+            VkFramebufferCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            info.pNext = nullptr;
+            info.renderPass = renderPass;
+            info.pAttachments = attachments;
+            info.attachmentCount = 1;
+            info.width = m_Image->GetWidth();
+            info.height = m_Image->GetHeight();
+            info.layers = 1;
+            CHECK_VK_RESULT(vkCreateFramebuffer(g_Device, &info, nullptr, &m_vkFramebuffer));
+        }
+    }
+
+    ~RenderTarget() {
+        vkDestroyFence(g_Device, m_vkFence, nullptr);
+        vkFreeCommandBuffers(g_Device, g_CommandPool, 1, &m_vkCommandBuffer);
+        vkDestroyFramebuffer(g_Device, m_vkFramebuffer, nullptr);
+    }
+
+    VkFence GetVkFence() const {
+        return m_vkFence;
+    }
+
+    VkCommandBuffer GetVkCommandBuffer() const {
+        return m_vkCommandBuffer;
+    }
+
+    VkFramebuffer GetVkFramebuffer() const {
+        return m_vkFramebuffer;
+    }
+
+    int GetWidth() const {
+        return m_Image->GetWidth();
+    }
+
+    int GetHeight() const {
+        return m_Image->GetHeight();
+    }
+
+    VkImage GetVkImage() const {
+        return m_Image->GetVkImage();
+    }
+
+    VkDescriptorSet GetDesc() {
+        return m_Image->GetDesc();
+    }
+
+private:
+    VkFramebuffer m_vkFramebuffer = VK_NULL_HANDLE;
+    VkCommandBuffer m_vkCommandBuffer = VK_NULL_HANDLE;
+    VkFence m_vkFence = VK_NULL_HANDLE;
+    std::unique_ptr<Image> m_Image;
+};
+
+std::unique_ptr<RenderTarget> g_RenderTarget;
+
+void CreateRenderTarget(VkRenderPass renderPass) {
+    g_RenderTarget = std::make_unique<RenderTarget>(1920, 1080, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, renderPass);
+}
+
+void UpdateRenderTarget(VkRenderPass renderPass) {
+    VkFence fence = g_RenderTarget->GetVkFence();
+    vkResetFences(g_Device, 1, &fence);
+
+    vkResetCommandBuffer(g_RenderTarget->GetVkCommandBuffer(), 0);
+
+    {
+        VkCommandBufferBeginInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        CHECK_VK_RESULT(vkBeginCommandBuffer(g_RenderTarget->GetVkCommandBuffer(), &info));
+    }
+
+    {
+        VkClearValue clearColor = { { { 1.0f, 0.0f, 0.0f, 1.0f } } };
+        VkRenderPassBeginInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        info.renderPass = renderPass;
+        info.framebuffer = g_RenderTarget->GetVkFramebuffer();
+        info.renderArea.extent.width = g_RenderTarget->GetWidth();
+        info.renderArea.extent.height = g_RenderTarget->GetHeight();
+        info.clearValueCount = 1;
+        info.pClearValues = &clearColor;
+        vkCmdBeginRenderPass(g_RenderTarget->GetVkCommandBuffer(), &info, VK_SUBPASS_CONTENTS_INLINE);
+    }
+
+    VkViewport viewport;
+    viewport.x = 0;
+    viewport.y = 0;
+    viewport.width = static_cast<float>(g_RenderTarget->GetWidth());
+    viewport.height = static_cast<float>(g_RenderTarget->GetHeight());
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(g_RenderTarget->GetVkCommandBuffer(), 0, 1, &viewport);
+
+    VkRect2D scissor;
+    scissor.offset.x = 0;
+    scissor.offset.y = 0;
+    scissor.extent.width = g_RenderTarget->GetWidth();
+    scissor.extent.height = g_RenderTarget->GetHeight();
+    vkCmdSetScissor(g_RenderTarget->GetVkCommandBuffer(), 0, 1, &scissor);
+
+    vkCmdEndRenderPass(g_RenderTarget->GetVkCommandBuffer());
+
+    {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = g_RenderTarget->GetVkImage();
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vkCmdPipelineBarrier(g_RenderTarget->GetVkCommandBuffer(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
+    CHECK_VK_RESULT(vkEndCommandBuffer(g_RenderTarget->GetVkCommandBuffer()));
+
+    {
+        VkPipelineStageFlags waitStageFlags[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+        const VkCommandBuffer commandBuffer[] = { g_RenderTarget->GetVkCommandBuffer() };
+        VkSubmitInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        info.commandBufferCount = 1;
+        info.pCommandBuffers = commandBuffer;
+        info.waitSemaphoreCount = 0;
+        info.signalSemaphoreCount = 0;
+        info.pWaitDstStageMask = waitStageFlags;
+        vkQueueSubmit(g_Queue, 1, &info, g_RenderTarget->GetVkFence());
+    }
+    
+    const VkFence fences[] = { g_RenderTarget->GetVkFence() };
+    vkWaitForFences(g_Device, 1, fences, VK_TRUE, UINT64_MAX);
+}
+
 // Main code
 int main(int, char**) {
     glfwSetErrorCallback(glfw_error_callback);
@@ -442,6 +756,8 @@ int main(int, char**) {
     init_info.Allocator = g_Allocator;
     init_info.CheckVkResultFn = check_vk_result;
     ImGui_ImplVulkan_Init(&init_info, wd->RenderPass);
+
+    CreateRenderTarget(wd->RenderPass);
 
     // Load Fonts
     // - If no fonts are loaded, dear imgui will use the default font. You can also load multiple fonts and use ImGui::PushFont()/PopFont() to select them.
@@ -520,6 +836,13 @@ int main(int, char**) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        UpdateRenderTarget(wd->RenderPass);
+
+        if (ImGui::Begin("Render Target")) {
+            ImGui::Image(g_RenderTarget->GetDesc(), ImVec2(g_RenderTarget->GetWidth(), g_RenderTarget->GetHeight()));
+        }
+        ImGui::End();
+
         // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
         if (show_demo_window)
             ImGui::ShowDemoWindow(&show_demo_window);
@@ -577,6 +900,8 @@ int main(int, char**) {
         if (!main_is_minimized)
             FramePresent(wd);
     }
+
+    g_RenderTarget.reset();
 
     // Cleanup
     err = vkDeviceWaitIdle(g_Device);

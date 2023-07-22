@@ -131,6 +131,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\src\main.cpp" />
+    <ClCompile Include="..\..\src\vulkan_vma.cpp" />
     <ClCompile Include="..\..\vendor\imgui\backends\imgui_impl_glfw.cpp" />
     <ClCompile Include="..\..\vendor\imgui\backends\imgui_impl_vulkan.cpp" />
     <ClCompile Include="..\..\vendor\imgui\imgui.cpp" />
