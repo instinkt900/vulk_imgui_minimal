@@ -1,0 +1,6 @@
+.vs
+project/vs/x64/Intermediate
+project/vs/x64/Debug
+project/vs/x64/Release
+*.vcxproj.user
+imgui.ini
