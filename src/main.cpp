@@ -597,13 +597,54 @@ private:
     std::unique_ptr<Image> m_Image;
 };
 
+VkRenderPass g_RTRenderPass;
 std::unique_ptr<RenderTarget> g_RenderTarget;
 
-void CreateRenderTarget(VkRenderPass renderPass) {
-    g_RenderTarget = std::make_unique<RenderTarget>(1920, 1080, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, renderPass);
+void CreateRTRenderPass() {
+    VkAttachmentDescription colorAttachment{};
+    // colorAttachment.format = VK_FORMAT_R8G8B8A8_SRGB; // TODO this might have to change?
+    colorAttachment.format = VK_FORMAT_B8G8R8A8_UNORM;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
+    CHECK_VK_RESULT(vkCreateRenderPass(g_Device, &renderPassInfo, nullptr, &g_RTRenderPass));
 }
 
-void UpdateRenderTarget(VkRenderPass renderPass) {
+void CreateRenderTarget() {
+    g_RenderTarget = std::make_unique<RenderTarget>(1920, 1080, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, g_RTRenderPass);
+}
+
+void UpdateRenderTarget() {
     VkFence fence = g_RenderTarget->GetVkFence();
     vkResetFences(g_Device, 1, &fence);
 
@@ -620,7 +661,7 @@ void UpdateRenderTarget(VkRenderPass renderPass) {
         VkClearValue clearColor = { { { 1.0f, 0.0f, 0.0f, 1.0f } } };
         VkRenderPassBeginInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        info.renderPass = renderPass;
+        info.renderPass = g_RTRenderPass;
         info.framebuffer = g_RenderTarget->GetVkFramebuffer();
         info.renderArea.extent.width = g_RenderTarget->GetWidth();
         info.renderArea.extent.height = g_RenderTarget->GetHeight();
@@ -647,23 +688,23 @@ void UpdateRenderTarget(VkRenderPass renderPass) {
 
     vkCmdEndRenderPass(g_RenderTarget->GetVkCommandBuffer());
 
-    {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = g_RenderTarget->GetVkImage();
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.layerCount = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.levelCount = 1;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        vkCmdPipelineBarrier(g_RenderTarget->GetVkCommandBuffer(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    }
+    //{
+    //    VkImageMemoryBarrier barrier{};
+    //    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    //    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    //    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //    barrier.image = g_RenderTarget->GetVkImage();
+    //    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    //    barrier.subresourceRange.baseMipLevel = 0;
+    //    barrier.subresourceRange.layerCount = 1;
+    //    barrier.subresourceRange.baseArrayLayer = 0;
+    //    barrier.subresourceRange.levelCount = 1;
+    //    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    //    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    //    vkCmdPipelineBarrier(g_RenderTarget->GetVkCommandBuffer(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    //}
 
     CHECK_VK_RESULT(vkEndCommandBuffer(g_RenderTarget->GetVkCommandBuffer()));
 
@@ -757,7 +798,8 @@ int main(int, char**) {
     init_info.CheckVkResultFn = check_vk_result;
     ImGui_ImplVulkan_Init(&init_info, wd->RenderPass);
 
-    CreateRenderTarget(wd->RenderPass);
+    CreateRTRenderPass();
+    CreateRenderTarget();
 
     // Load Fonts
     // - If no fonts are loaded, dear imgui will use the default font. You can also load multiple fonts and use ImGui::PushFont()/PopFont() to select them.
@@ -810,8 +852,10 @@ int main(int, char**) {
     bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
+    bool temp = false;
     // Main loop
     while (!glfwWindowShouldClose(window)) {
+        UpdateRenderTarget();
         // Poll and handle events (inputs, window resize, etc.)
         // You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
         // - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
@@ -835,8 +879,6 @@ int main(int, char**) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-
-        UpdateRenderTarget(wd->RenderPass);
 
         if (ImGui::Begin("Render Target")) {
             ImGui::Image(g_RenderTarget->GetDesc(), ImVec2(g_RenderTarget->GetWidth(), g_RenderTarget->GetHeight()));
